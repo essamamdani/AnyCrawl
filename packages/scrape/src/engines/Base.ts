@@ -19,7 +19,7 @@ import { ProgressManager } from "../managers/Progress.js";
 import { JOB_TYPE_CRAWL, JOB_TYPE_SCRAPE } from "@anycrawl/libs";
 import { CrawlLimitReachedError } from "../errors/index.js";
 import type { CrawlingContext, EngineOptions } from "../types/engine.js";
-import minimatch from "minimatch";
+import { minimatch } from "minimatch";
 
 // Template system imports - directly use @anycrawl/template-client
 
