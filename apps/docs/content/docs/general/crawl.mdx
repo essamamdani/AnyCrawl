@@ -47,6 +47,34 @@ curl -X POST "https://api.anycrawl.dev/v1/crawl" \
   }'
 ```
 
+### Selective scraping with scrape_paths
+
+Use `scrape_paths` to visit pages for link discovery without extracting content. This reduces costs and storage:
+
+```bash tab="cURL"
+curl -X POST "https://api.anycrawl.dev/v1/crawl" \
+  -H "Authorization: Bearer <YOUR_API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://shop.example.com",
+    "engine": "cheerio",
+    "strategy": "same-domain",
+    "max_depth": 5,
+    "limit": 200,
+    "include_paths": ["/*"],
+    "scrape_paths": ["/products/*/details", "/products/*/reviews"],
+    "scrape_options": {
+      "formats": ["markdown", "json"]
+    }
+  }'
+```
+
+In this example:
+
+- All pages matching `/*` will be **visited** to discover links
+- Only pages matching `/products/*/details` or `/products/*/reviews` will have **content extracted and saved**
+- Category pages, navigation pages, etc. are crawled but not scraped, saving credits and storage
+
 ```javascript tab="JavaScript"
 const start = await fetch("https://api.anycrawl.dev/v1/crawl", {
     method: "POST",
@@ -134,16 +162,17 @@ curl -X DELETE -H "Authorization: Bearer <YOUR_API_KEY>" \
 
 ## Request Parameters
 
-| Parameter        | Type            | Required | Default       | Description                                                                              |
-| ---------------- | --------------- | -------- | ------------- | ---------------------------------------------------------------------------------------- |
-| `url`            | string          | Yes      | -             | Seed URL to start crawling                                                               |
-| `engine`         | enum            | No       | `cheerio`     | Per-page scraping engine: `cheerio`, `playwright`, `puppeteer`                           |
-| `exclude_paths`  | array of string | No       | -             | Path rules to exclude (glob-like), e.g. `/blog/*`                                        |
-| `include_paths`  | array of string | No       | -             | Path rules to include (applied after exclusion)                                          |
-| `max_depth`      | number          | No       | `10`          | Max depth from the seed URL                                                              |
-| `strategy`       | enum            | No       | `same-domain` | Crawl scope: `all`, `same-domain`, `same-hostname`, `same-origin`                        |
-| `limit`          | number          | No       | `100`         | Maximum number of pages to crawl                                                         |
-| `scrape_options` | object          | No       | -             | Per-page scrape options (same fields as `/v1/scrape` excluding top-level `url`/`engine`) |
+| Parameter        | Type            | Required | Default       | Description                                                                                                              |
+| ---------------- | --------------- | -------- | ------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `url`            | string          | Yes      | -             | Seed URL to start crawling                                                                                               |
+| `engine`         | enum            | No       | `cheerio`     | Per-page scraping engine: `cheerio`, `playwright`, `puppeteer`                                                           |
+| `exclude_paths`  | array of string | No       | -             | Path rules to exclude (glob-like), e.g. `/blog/*`                                                                        |
+| `include_paths`  | array of string | No       | -             | Path rules to include for crawling (applied after exclusion)                                                             |
+| `scrape_paths`   | array of string | No       | -             | Path rules for content extraction. Only matching URLs will have content saved. If not set, all included URLs are scraped |
+| `max_depth`      | number          | No       | `10`          | Max depth from the seed URL                                                                                              |
+| `strategy`       | enum            | No       | `same-domain` | Crawl scope: `all`, `same-domain`, `same-hostname`, `same-origin`                                                        |
+| `limit`          | number          | No       | `100`         | Maximum number of pages to crawl                                                                                         |
+| `scrape_options` | object          | No       | -             | Per-page scrape options (same fields as `/v1/scrape` excluding top-level `url`/`engine`)                                 |
 
 ### `scrape_options` fields
 
@@ -275,8 +304,28 @@ curl -X DELETE -H "Authorization: Bearer <YOUR_API_KEY>" \
 
 - Use `/v1/scrape` for single pages to minimize cost; use `/v1/crawl` for site-wide data.
 - Tune `strategy`, `max_depth`, and path rules to control scope and cost.
+- Use `scrape_paths` to reduce costs: crawl navigation/category pages for links, but only scrape content pages.
 - Use `formats` to limit output size to what you actually need.
 - Page through results via `skip` to avoid very large responses.
+
+### Cost Optimization with scrape_paths
+
+The `scrape_paths` parameter allows you to optimize crawling costs:
+
+**Without `scrape_paths` (default)**:
+
+- All included pages → visited + content extracted + saved
+
+**With `scrape_paths`**:
+
+- Pages in `include_paths` but NOT in `scrape_paths` → visited only (for link discovery)
+- Pages in BOTH `include_paths` AND `scrape_paths` → visited + content extracted + saved
+
+Example use cases:
+
+- E-commerce: Crawl all category pages, but only scrape product detail pages
+- Documentation: Visit all navigation pages, but only extract article content
+- News sites: Browse all sections, but only save full article pages
 
 ## Error Handling Example
 
@@ -323,7 +372,18 @@ const jobs = await Promise.all(
 
 ### How do I limit crawl scope and cost?
 
-Use `strategy`, `max_depth`, `limit`, and path rules (`include_paths`, `exclude_paths`).
+Use `strategy`, `max_depth`, `limit`, and path rules (`include_paths`, `exclude_paths`, `scrape_paths`).
+
+### What's the difference between `include_paths` and `scrape_paths`?
+
+- `include_paths`: Controls which URLs are **visited** (for link discovery)
+- `scrape_paths`: Controls which URLs have **content extracted and saved**
+
+If `scrape_paths` is not set, all included URLs will be scraped (backward compatible behavior).
+
+### How can I reduce crawling costs?
+
+Use `scrape_paths` to visit navigation/category pages for link discovery without saving their content. Only extract and save content from pages that match your `scrape_paths` patterns.
 
 ### How do I paginate results?
 

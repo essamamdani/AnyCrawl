@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.8] - 2025-10-22
+
+### Added
+
+- Domain restriction validation for templates with glob and exact pattern matching support
+- Pre-navigation API for browser-based templates with HTML content resolution from multiple sources
+- Environment variable `ANYCRAWL_TEMPLATE_CACHE_TTL_MS` for controlling template cache behavior (set to 0 to disable cache)
+
+### Changed
+
+- Enhanced template cache to support TTL-based disabling (TTL=0 disables caching completely)
+- Template sandbox now provides secure page proxy with whitelisted methods for Playwright/Puppeteer
+
+### Fixed
+
+- Template validation cache now correctly invalidates in development mode to improve developer experience
+
 ## [1.0.0-beta.6] - 2025-10-16
 
 ### Added

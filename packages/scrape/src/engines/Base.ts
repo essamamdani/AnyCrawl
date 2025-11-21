@@ -19,6 +19,7 @@ import { ProgressManager } from "../managers/Progress.js";
 import { JOB_TYPE_CRAWL, JOB_TYPE_SCRAPE } from "@anycrawl/libs";
 import { CrawlLimitReachedError } from "../errors/index.js";
 import type { CrawlingContext, EngineOptions } from "../types/engine.js";
+import { minimatch } from "minimatch";
 
 // Template system imports - directly use @anycrawl/template-client
 
@@ -358,6 +359,8 @@ export abstract class BaseEngine {
             if (isCrawlJob) {
                 try { await pmForEnqueue.beginEnqueue(jobId); } catch { }
             }
+            console.log('includeGlobs', includeGlobs);
+            console.log('includeRegexps', includeRegexps);
             try {
                 const enqLinks = await context.enqueueLinks({
                     ...(includeGlobs.length > 0 ? { globs: includeGlobs } : {}),
@@ -374,7 +377,7 @@ export abstract class BaseEngine {
                     // Keep original limit to ensure we don't under-enqueue
                     limit: limit,
                     onSkippedRequest: ({ url, reason }) => {
-                        log.debug(`[${context.request.userData.queueName}] [${context.request.userData.jobId}] Skipped (${reason}): ${url}`);
+                        // log.debug(`[${context.request.userData.queueName}] [${context.request.userData.jobId}] Skipped (${reason}): ${url}`);
                     },
                     transformRequestFunction: (request) => {
                         const jobId = request.userData?.jobId;
@@ -434,6 +437,51 @@ export abstract class BaseEngine {
         } catch (error) {
             log.error(`Error in enqueueLinks: ${error instanceof Error ? error.message : String(error)}`);
         }
+    }
+
+    /**
+     * Check if a URL should be scraped based on scrape_paths configuration
+     * @param url - The URL to check
+     * @param scrapePaths - Array of glob/regex patterns from scrape_paths config
+     * @returns true if the URL should be scraped, false otherwise
+     */
+    protected shouldScrapeUrl(url: string, scrapePaths?: string[]): boolean {
+        // If scrape_paths is not configured, scrape all URLs (backward compatible)
+        if (!scrapePaths || scrapePaths.length === 0) {
+            return true;
+        }
+
+        // Check if URL matches any scrape_paths pattern
+        for (const pattern of scrapePaths) {
+            if (typeof pattern !== 'string') continue;
+
+            // Support regex literal style strings: /pattern/flags
+            const match = pattern.match(/^\/(.*)\/([gimsuy]*)$/);
+            if (match) {
+                const body: string = match[1] ?? '';
+                const flagsStr: string = match[2] ?? '';
+                try {
+                    const regex = new RegExp(body, flagsStr);
+                    if (regex.test(url)) {
+                        return true;
+                    }
+                    continue;
+                } catch {
+                    // Fall through to treat as glob if regex is invalid
+                }
+            }
+
+            // Otherwise treat as glob pattern
+            try {
+                if (minimatch(url, pattern, { dot: true })) {
+                    return true;
+                }
+            } catch {
+                // Ignore invalid patterns
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -773,11 +821,25 @@ export abstract class BaseEngine {
                     return;
                 }
 
+                // Check if we should scrape this URL (for crawl jobs only)
+                // For scrape jobs, always save the result
+                const shouldScrape = context.request.userData.type === JOB_TYPE_SCRAPE
+                    || this.shouldScrapeUrl(
+                        context.request.url,
+                        context.request.userData.crawl_options?.scrape_paths
+                    );
+
                 // insert job result - use parentId if available (for search scrape), otherwise use jobId
                 const resultJobId = context.request.userData.parentId || context.request.userData.jobId;
-                await insertJobResult(resultJobId, context.request.url, data, JOB_RESULT_STATUS.SUCCESS);
 
-                // Handle crawl logic if this is a crawl job
+                // Only save result if shouldScrape is true
+                if (shouldScrape) {
+                    await insertJobResult(resultJobId, context.request.url, data, JOB_RESULT_STATUS.SUCCESS);
+                } else {
+                    log.info(`[${context.request.userData.queueName}] [${context.request.userData.jobId}] Skipping scrape for ${context.request.url} (not in scrape_paths)`);
+                }
+
+                // Handle crawl logic if this is a crawl job (always run to discover links)
                 if (context.request.userData.type === JOB_TYPE_CRAWL) {
                     await this.handleCrawlLogic(context, data);
                 }

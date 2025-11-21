@@ -15,9 +15,16 @@ const crawlOptionsSchema = z.object({
 
     /**
      * Paths to include in crawling (supports wildcards)
-     * 
+     * URLs matching these patterns will be visited and links extracted
      */
     include_paths: z.array(z.string()).optional(),
+
+    /**
+     * Paths to scrape content from (supports wildcards)
+     * Only URLs matching these patterns will have their content extracted and saved
+     * If not specified, all included URLs will be scraped (default behavior)
+     */
+    scrape_paths: z.array(z.string()).optional(),
 
     /**
      * Maximum depth to crawl from the starting URL
@@ -85,6 +92,7 @@ const transformSchema = (data: z.infer<typeof mergedSchema>) => {
             template_id: data.template_id,
             exclude_paths: data.exclude_paths,
             include_paths: data.include_paths,
+            scrape_paths: data.scrape_paths,
             max_depth: data.max_depth,
             limit: data.limit,
             strategy: data.strategy,

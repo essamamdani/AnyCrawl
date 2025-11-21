@@ -277,7 +277,15 @@
                                         "items": {
                                             "type": "string"
                                         },
-                                        "description": "Glob patterns or path prefixes to include (applied after exclusion rules)"
+                                        "description": "Glob patterns or path prefixes to include for crawling (applied after exclusion rules)"
+                                    },
+                                    "scrape_paths": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "string"
+                                        },
+                                        "description": "Glob patterns or path prefixes for content extraction. Only URLs matching these patterns will have content extracted and saved. If not specified, all included URLs will be scraped (default behavior)",
+                                        "example": ["/products/*/details", "/articles/*"]
                                     },
                                     "max_depth": {
                                         "type": "number",

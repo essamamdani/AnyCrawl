@@ -3,6 +3,7 @@ import { BaseAgent } from "./BaseAgent.js";
 import { TextChunker, ChunkResult } from "./TextChunker.js";
 import { log } from "@anycrawl/libs";
 import { buildExtractionPrompt, EXTRACT_SYSTEM_PROMPT } from "../prompts/extract.prompts.js";
+import { CostTracking } from "./CostTracking.js";
 
 // --- Schema normalization helpers ---
 function removeDefaultProperty(obj: any): any {
@@ -276,6 +277,20 @@ class LLMExtract extends BaseAgent {
      */
     async perform(text: string | string[], schema: JSONSchema7, options: ExtractOptions = {}): Promise<ExtractResult> {
         const overallStart = Date.now();
+        const scopedTracking = new CostTracking(this.costTracking.limit);
+        const recordCall = (call: {
+            type: "extract" | "batch" | "merge";
+            metadata: Record<string, any>;
+            cost: number;
+            model: string;
+            tokens?: {
+                input: number;
+                output: number;
+            };
+        }) => {
+            scopedTracking.addCall(call);
+            this.costTracking.addCall(call);
+        };
         // --- normalize schema ---
         const normalizedSchema = normalizeSchema(schema);
         // Get default parameters based on model config
@@ -309,7 +324,7 @@ class LLMExtract extends BaseAgent {
                 const systemPrompt = options.systemPrompt || this.systemPrompt || "";
                 const usageTokens = this.extractUsageTokens(result, fullPrompt + systemPrompt, result.object);
                 if (typeof usageTokens.providerCost === 'number') {
-                    this.costTracking.addCall({
+                    recordCall({
                         type: "extract",
                         metadata: { direct: true },
                         cost: usageTokens.providerCost,
@@ -317,7 +332,13 @@ class LLMExtract extends BaseAgent {
                         tokens: { input: usageTokens.inputTokens, output: usageTokens.outputTokens }
                     });
                 } else {
-                    this.trackCall("extract", { direct: true }, usageTokens.inputTokens, usageTokens.outputTokens);
+                    recordCall({
+                        type: "extract",
+                        metadata: { direct: true },
+                        cost: this.calculateCost(usageTokens.inputTokens, usageTokens.outputTokens),
+                        model: this.modelId,
+                        tokens: { input: usageTokens.inputTokens, output: usageTokens.outputTokens }
+                    });
                 }
 
                 const totalDuration = Date.now() - overallStart;
@@ -329,7 +350,7 @@ class LLMExtract extends BaseAgent {
                         total: usageTokens.totalTokens
                     },
                     chunks: 1,
-                    cost: this.costTracking.getTotalCost(),
+                    cost: scopedTracking.getTotalCost(),
                     usage: usageTokens.rawUsage ?? undefined,
                     durationMs: totalDuration
                 };
@@ -383,7 +404,7 @@ class LLMExtract extends BaseAgent {
                 const systemPrompt = options.systemPrompt || this.systemPrompt || "";
                 const usageTokens = this.extractUsageTokens(result, fullPrompt + systemPrompt, result.object);
                 if (typeof usageTokens.providerCost === 'number') {
-                    this.costTracking.addCall({
+                    recordCall({
                         type: "extract",
                         metadata: { direct: false, chunkIndex: index + 1, totalChunks: allChunks.length },
                         cost: usageTokens.providerCost,
@@ -391,22 +412,34 @@ class LLMExtract extends BaseAgent {
                         tokens: { input: usageTokens.inputTokens, output: usageTokens.outputTokens }
                     });
                 } else {
-                    this.trackCall("extract", { direct: false, chunkIndex: index + 1, totalChunks: allChunks.length }, usageTokens.inputTokens, usageTokens.outputTokens);
+                    recordCall({
+                        type: "extract",
+                        metadata: { direct: false, chunkIndex: index + 1, totalChunks: allChunks.length },
+                        cost: this.calculateCost(usageTokens.inputTokens, usageTokens.outputTokens),
+                        model: this.modelId,
+                        tokens: { input: usageTokens.inputTokens, output: usageTokens.outputTokens }
+                    });
                 }
             } catch (error) {
                 log.error(`❌ Error processing chunk ${chunkInfo.startIndex}-${chunkInfo.endIndex}: ${error instanceof Error ? error.message : String(error)}`);
                 allResults.push(null);
             }
         }
-        this.trackCall("merge", { chunksCount: allChunks.length }, 0, 0);
+        recordCall({
+            type: "merge",
+            metadata: { chunksCount: allChunks.length },
+            cost: 0,
+            model: this.modelId,
+            tokens: { input: 0, output: 0 }
+        });
         const mergedResult = this.mergeResults(allResults, normalizedSchema);
-        const totalTokens = this.costTracking.getTotalTokens();
+        const totalTokens = scopedTracking.getTotalTokens();
         const totalDuration = Date.now() - overallStart;
         const finalResult = {
             data: mergedResult,
             tokens: totalTokens,
             chunks: allChunks.length,
-            cost: this.costTracking.getTotalCost(),
+            cost: scopedTracking.getTotalCost(),
             durationMs: totalDuration
         };
         log.info(`[extract] tokens(input=${finalResult.tokens.input}, output=${finalResult.tokens.output}, total=${finalResult.tokens.total}) cost=$${finalResult.cost?.toFixed(6)} duration=${totalDuration}ms model=${this.modelId} chunks=${finalResult.chunks}`);
