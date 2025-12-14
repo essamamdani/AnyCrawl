@@ -5,6 +5,7 @@ x-common-service: &common-service
         - anycrawl-network
     volumes:
         - ./storage:/usr/src/app/storage
+        - ./db:/usr/src/app/db
 
 x-common-env: &common-env
     ANYCRAWL_HEADLESS: ${ANYCRAWL_HEADLESS:-true}
@@ -15,6 +16,8 @@ x-common-env: &common-env
     ANYCRAWL_API_AUTH_ENABLED: ${ANYCRAWL_API_AUTH_ENABLED:-false}
     CUSTOM_BASE_URL: ${CUSTOM_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
     CUSTOM_API_KEY: ${CUSTOM_API_KEY:-}
+    ANYCRAWL_API_DB_TYPE: "sqlite"
+    ANYCRAWL_API_DB_CONNECTION: "/usr/src/app/db/database.db"
 
 services:
     api:
@@ -28,7 +31,6 @@ services:
             PORT: 8080
         volumes:
             - ./storage:/usr/src/app/storage
-            - ./db:/usr/src/app/db
         depends_on:
             - redis
 
