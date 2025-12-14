@@ -29,8 +29,6 @@ services:
         environment:
             <<: *common-env
             PORT: 8080
-        volumes:
-            - ./storage:/usr/src/app/storage
         depends_on:
             - redis
 
