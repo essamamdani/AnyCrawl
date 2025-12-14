@@ -7,7 +7,6 @@ x-common-service: &common-service
         - ./storage:/usr/src/app/storage
 
 x-common-env: &common-env
-    NODE_ENV: ${NODE_ENV:-production}
     ANYCRAWL_HEADLESS: ${ANYCRAWL_HEADLESS:-true}
     ANYCRAWL_PROXY_URL: ${ANYCRAWL_PROXY_URL:-}
     ANYCRAWL_IGNORE_SSL_ERROR: ${ANYCRAWL_IGNORE_SSL_ERROR:-true}
@@ -16,6 +15,7 @@ x-common-env: &common-env
     ANYCRAWL_API_AUTH_ENABLED: ${ANYCRAWL_API_AUTH_ENABLED:-false}
     ANYCRAWL_API_DB_TYPE: "sqlite"
     ANYCRAWL_API_DB_CONNECTION: "/usr/src/app/db/database.db"
+    CUSTOM_BASE_URL: ${CUSTOM_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
 
 services:
     api:
