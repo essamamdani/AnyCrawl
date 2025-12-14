@@ -8,9 +8,14 @@ ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 ENV NODE_ENV=production
 
+# 🔑 procps provides `ps` (fixes spawn ps ENOENT)
 RUN corepack enable pnpm && \
     apt-get update && apt-get install -y \
-      build-essential python3 make g++ \
+      build-essential \
+      python3 \
+      make \
+      g++ \
+      procps \
     && rm -rf /var/lib/apt/lists/*
 
 FROM base AS build
@@ -64,7 +69,7 @@ COPY --from=build /usr/src/app/packages/template-client/package.json /usr/src/ap
 RUN --mount=type=cache,id=pnpm-glibc,target=/pnpm/store \
     pnpm install --prod --frozen-lockfile
 
-# CRITICAL: rebuild sqlite for glibc
+# 🔐 rebuild native sqlite for glibc
 RUN pnpm rebuild better-sqlite3
 
 ENV ANYCRAWL_AVAILABLE_ENGINES=cheerio
