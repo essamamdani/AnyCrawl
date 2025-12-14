@@ -17,7 +17,11 @@ x-common-env: &common-env
     CUSTOM_BASE_URL: ${CUSTOM_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
     CUSTOM_API_KEY: ${CUSTOM_API_KEY:-}
     ANYCRAWL_API_DB_TYPE: "sqlite"
+    ANYCRAWL_USER_AGENT: ${ANYCRAWL_USER_AGENT}
     ANYCRAWL_API_DB_CONNECTION: "/usr/src/app/db/database.db"
+    ANYCRAWL_MAX_CONCURRENCY: ${ANYCRAWL_MAX_CONCURRENCY:-50}
+    ANYCRAWL_DOMAIN: ${SERVICE_URL_API}
+    ANYCRAWL_TEMPLATE_CACHE_TTL_MS: ${ANYCRAWL_TEMPLATE_CACHE_TTL_MS:-600000}
 
 services:
     api:
