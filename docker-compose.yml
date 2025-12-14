@@ -13,9 +13,8 @@ x-common-env: &common-env
     ANYCRAWL_REDIS_URL: ${ANYCRAWL_REDIS_URL:-redis://redis:6379}
     ANYCRAWL_API_PORT: ${ANYCRAWL_API_PORT:-8080}
     ANYCRAWL_API_AUTH_ENABLED: ${ANYCRAWL_API_AUTH_ENABLED:-false}
-    ANYCRAWL_API_DB_TYPE: "sqlite"
-    ANYCRAWL_API_DB_CONNECTION: "/usr/src/app/db/database.db"
     CUSTOM_BASE_URL: ${CUSTOM_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
+    CUSTOM_API_KEY: ${CUSTOM_API_KEY:-}
 
 services:
     api:
