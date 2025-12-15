@@ -1,8 +1,6 @@
 name: anycrawl
 
 x-common-service: &common-service
-    networks:
-        - anycrawl-network
     volumes:
         - ./storage:/usr/src/app/storage
         - ./db:/usr/src/app/db
@@ -72,13 +70,7 @@ services:
         image: redis:7-alpine
         volumes:
             - redis-data:/data
-        networks:
-            - anycrawl-network
         command: redis-server --appendonly yes
 
 volumes:
     redis-data:
-
-networks:
-    anycrawl-network:
-        driver: bridge
