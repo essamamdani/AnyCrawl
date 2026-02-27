@@ -1,5 +1,6 @@
 import { Request, ProxyConfiguration as CrawleeProxyConfiguration } from "crawlee";
-import { log } from "@anycrawl/libs/log";
+import { log, isProxyMode, getResolvedProxyMode, getBaseProxyUrls, getStealthProxyUrls } from "@anycrawl/libs";
+import type { ProxyMode, ResolvedProxyMode } from "@anycrawl/libs";
 import type { Dictionary } from '@crawlee/types';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
@@ -8,8 +9,11 @@ import * as https from 'https';
 
 import { cryptoRandomObjectId } from '@apify/utilities';
 
+export type { ProxyMode, ResolvedProxyMode };
+export { isProxyMode, getResolvedProxyMode as getResolvedProxyModeName };
+
 export interface ProxyConfigurationFunction {
-    (sessionId: string | number, options?: { request?: Request }): string | null | Promise<string | null>;
+    (sessionId: string | number, options?: { request?: Request; proxyTier?: number }): string | null | Promise<string | null>;
 }
 
 export interface ProxyConfigurationOptions {
@@ -233,7 +237,10 @@ export class ProxyConfiguration extends CrawleeProxyConfiguration {
 
         // First try newUrlFunction
         if (this.newUrlFunction) {
-            const result = await this._callNewUrlFunction(sessionId, { request: options?.request });
+            const result = await this._callNewUrlFunction(sessionId, {
+                request: options?.request,
+                proxyTier: options?.proxyTier,
+            } as any);
             if (result) {
                 url = result;
             }
@@ -283,7 +290,8 @@ export class ProxyConfiguration extends CrawleeProxyConfiguration {
                 const combined = [matchedProxy, ...fallbackProxies];
                 const selectedProxy = combined[this.nextCustomUrlIndex++ % combined.length] ?? null;
                 if (selectedProxy) {
-                    this.log.info(`Using merged proxy list (rule + fallback): ${selectedProxy} for URL: ${options.request.url}`);
+                    const originalUrl = (options.request.userData as any)?.original_url;
+                    this.log.info(`[PROXY] URL: ${options.request.url}${originalUrl && originalUrl !== options.request.url ? ` (original: ${originalUrl})` : ''} → Using merged proxy (rule + fallback): ${selectedProxy}`);
                 }
                 return {
                     proxyUrl: selectedProxy,
@@ -295,7 +303,7 @@ export class ProxyConfiguration extends CrawleeProxyConfiguration {
             const allProxyUrls = this.tieredProxyUrls.flat().filter((url): url is string | null => url !== undefined);
             const selectedProxy = allProxyUrls[this.nextCustomUrlIndex++ % allProxyUrls.length] ?? null;
             if (selectedProxy) {
-                this.log.info(`Using tiered proxy: ${selectedProxy}`);
+                this.log.info(`[PROXY] → Using tiered proxy (fallback): ${selectedProxy}`);
             }
             return {
                 proxyUrl: selectedProxy,
@@ -314,10 +322,10 @@ export class ProxyConfiguration extends CrawleeProxyConfiguration {
         }
 
         const selectedProxy = proxyTier[this.nextCustomUrlIndex++ % proxyTier.length] ?? null;
-        if (selectedProxy && options?.request?.url) {
-            this.log.info(`Using tiered proxy from tier ${tierPrediction}: ${selectedProxy} for URL: ${options.request.url}`);
-        } else if (selectedProxy) {
-            this.log.info(`Using tiered proxy from tier ${tierPrediction}: ${selectedProxy}`);
+        if (selectedProxy) {
+            const requestUrl = options?.request?.url || 'unknown';
+            const originalUrl = options?.request?.userData ? (options.request.userData as any)?.original_url : undefined;
+            this.log.info(`[PROXY] URL: ${requestUrl}${originalUrl && originalUrl !== requestUrl ? ` (original: ${originalUrl})` : ''} → Using tiered proxy from tier ${tierPrediction}: ${selectedProxy}`);
         }
 
         return {
@@ -523,6 +531,138 @@ function matchesUrlPattern(urlPattern: string, url: string): boolean {
 }
 
 /**
+ * Resolve proxy mode to tiered proxy URLs with fallback support
+ * Fallback rules:
+ * - base: Only base proxies, no fallback
+ * - stealth: Stealth proxies first, can fallback to base
+ * - auto: Base first, fallback to stealth
+ * - custom: Only the custom URL, no fallback
+ *
+ * @param proxyValue The proxy mode or custom URL from request
+ * @returns Tiered proxy URLs array for fallback support
+ */
+export function resolveProxyModeWithFallback(proxyValue: string | undefined): (string | null)[][] | null {
+    if (!proxyValue) {
+        return null;
+    }
+
+    const baseProxyUrls = getBaseProxyUrls();
+    const stealthProxyUrls = getStealthProxyUrls();
+
+    if (proxyValue === 'base') {
+        // Base mode: only base proxies, no upgrade to stealth
+        if (baseProxyUrls.length === 0) {
+            log.warning('[PROXY] Mode "base" requested but ANYCRAWL_PROXY_URL is not configured');
+            return null;
+        }
+        // Single tier with base proxies only
+        return [baseProxyUrls];
+    }
+
+    if (proxyValue === 'stealth') {
+        // Stealth mode: stealth first, can fallback to base
+        if (stealthProxyUrls.length === 0) {
+            log.warning('[PROXY] Mode "stealth" requested but ANYCRAWL_PROXY_STEALTH_URL is not configured, falling back to base');
+            if (baseProxyUrls.length === 0) {
+                return null;
+            }
+            return [baseProxyUrls];
+        }
+        // Tier 0: stealth, Tier 1: base (fallback)
+        if (baseProxyUrls.length > 0) {
+            return [stealthProxyUrls, baseProxyUrls];
+        }
+        return [stealthProxyUrls];
+    }
+
+    if (proxyValue === 'auto') {
+        // Auto mode: base first, fallback to stealth if base fails
+        if (baseProxyUrls.length > 0) {
+            // Tier 0: base, Tier 1: stealth (fallback)
+            if (stealthProxyUrls.length > 0) {
+                return [baseProxyUrls, stealthProxyUrls];
+            }
+            return [baseProxyUrls];
+        }
+        if (stealthProxyUrls.length > 0) {
+            return [stealthProxyUrls];
+        }
+        log.warning('[PROXY] Mode "auto" requested but neither ANYCRAWL_PROXY_URL nor ANYCRAWL_PROXY_STEALTH_URL is configured');
+        return null;
+    }
+
+    // Custom URL - no fallback allowed
+    return [[proxyValue]];
+}
+
+/**
+ * Resolve proxy mode or custom URL to actual proxy URL(s)
+ * @param proxyValue The proxy mode or custom URL from request
+ * @returns Array of proxy URLs to use, or null if no proxy
+ */
+export function resolveProxyMode(proxyValue: string | undefined): string[] | null {
+    const tiered = resolveProxyModeWithFallback(proxyValue);
+    if (!tiered || tiered.length === 0 || !tiered[0]) {
+        return null;
+    }
+    // Return first tier (primary proxies)
+    return tiered[0].filter((url): url is string => url !== null);
+}
+
+/**
+ * Get a single proxy URL from resolved proxy mode with tier support
+ * Rotates through available proxies using a simple counter
+ * @param proxyValue The proxy mode or custom URL
+ * @param proxyTier The tier to use (0 = primary, 1 = fallback)
+ */
+let proxyModeRotationIndex = 0;
+export function getProxyFromMode(proxyValue: string | undefined, proxyTier: number = 0): string | null {
+    const tiered = resolveProxyModeWithFallback(proxyValue);
+    if (!tiered || tiered.length === 0) {
+        return null;
+    }
+
+    // Use the specified tier, or fall back to last available tier
+    const tierIndex = Math.min(proxyTier, tiered.length - 1);
+    const tier = tiered[tierIndex];
+    if (!tier) {
+        return null;
+    }
+    const proxies = tier.filter((url): url is string => url !== null);
+
+    if (proxies.length === 0) {
+        return null;
+    }
+
+    const proxy = proxies[proxyModeRotationIndex++ % proxies.length];
+    return proxy || null;
+}
+
+/**
+ * Check if a proxy mode allows fallback
+ * @param proxyValue The proxy mode or custom URL
+ * @returns true if fallback is allowed
+ */
+export function canProxyFallback(proxyValue: string | undefined): boolean {
+    if (!proxyValue) return false;
+    // base: no fallback (cannot upgrade)
+    // stealth: can fallback to base
+    // auto: can fallback
+    // custom URL: no fallback
+    return proxyValue === 'stealth' || proxyValue === 'auto';
+}
+
+/**
+ * Get the number of proxy tiers available for a mode
+ * @param proxyValue The proxy mode or custom URL
+ * @returns Number of tiers available
+ */
+export function getProxyTierCount(proxyValue: string | undefined): number {
+    const tiered = resolveProxyModeWithFallback(proxyValue);
+    return tiered?.length || 0;
+}
+
+/**
  * Find matching proxy for a given URL based on the proxy configuration
  * @param requestUrl The URL to find proxy for
  * @returns Proxy URL if found, null otherwise
@@ -565,23 +705,52 @@ function findProxyForUrl(requestUrl: string): string | null {
 
 const proxyConfiguration = new ProxyConfiguration({
     newUrlFunction: (_sessionId: string | number, options?: { request?: Request }): string | null => {
-        // First priority: explicit proxy from request userData
+        const requestUrl = options?.request?.url || 'unknown';
+        const originalUrl = (options?.request?.userData as any)?.original_url;
+        const matchUrl = originalUrl || requestUrl;
+        const userDataTier = (options?.request?.userData as any)?._proxyTier;
+        const proxyTierRaw = (options as any)?.proxyTier;
+        const proxyTier =
+            typeof userDataTier === 'number' && Number.isFinite(userDataTier)
+                ? userDataTier
+                : (typeof proxyTierRaw === 'number' && Number.isFinite(proxyTierRaw) ? proxyTierRaw : 0);
+
+        // First priority: explicit proxy from request userData (supports modes: auto, base, stealth, or custom URL)
         if (options?.request?.userData?.options?.proxy) {
-            log.info(`Using proxy from request userData: ${options?.request?.userData?.options?.proxy}`);
-            return options?.request?.userData?.options?.proxy;
+            const proxyValue = options.request.userData.options.proxy;
+
+            // Check if it's a proxy mode or custom URL
+            if (isProxyMode(proxyValue)) {
+                const resolvedProxy = getProxyFromMode(proxyValue, proxyTier);
+                if (resolvedProxy) {
+                    const tierCount = getProxyTierCount(proxyValue);
+                    const tierInfo = tierCount > 1 ? ` (tier ${proxyTier}/${tierCount - 1})` : '';
+                    log.info(`[PROXY] URL: ${requestUrl}${originalUrl && originalUrl !== requestUrl ? ` (original: ${originalUrl})` : ''} → Using proxy mode "${proxyValue}"${tierInfo}: ${resolvedProxy}`);
+                    return resolvedProxy;
+                }
+                log.debug(`[PROXY] URL: ${requestUrl} → Proxy mode "${proxyValue}" resolved to no proxy`);
+            } else {
+                // Custom proxy URL - no fallback allowed
+                log.info(`[PROXY] URL: ${requestUrl}${originalUrl && originalUrl !== requestUrl ? ` (original: ${originalUrl})` : ''} → Using custom proxy from userData: ${proxyValue}`);
+                return proxyValue;
+            }
         }
 
         // Next: proxy rule matching should use original_url first if available
-        const matchUrl = (options?.request?.userData as any)?.original_url || options?.request?.url;
         if (matchUrl) {
             const matched = findProxyForUrl(matchUrl);
             if (matched) {
-                log.info(`Found proxy for URL ${matchUrl}: ${matched} By matching a rule.`);
+                log.info(`[PROXY] URL: ${requestUrl}${originalUrl && originalUrl !== requestUrl ? ` (original: ${originalUrl})` : ''} → Matched proxy rule: ${matched}`);
                 return matched;
             }
         }
 
         // Fallback to ANYCRAWL_PROXY_URL (handled by tieredProxyUrls)
+        if (process.env.ANYCRAWL_PROXY_URL) {
+            log.info(`[PROXY] URL: ${requestUrl}${originalUrl && originalUrl !== requestUrl ? ` (original: ${originalUrl})` : ''} → No rule matched, will use ANYCRAWL_PROXY_URL fallback`);
+        } else {
+            log.info(`[PROXY] URL: ${requestUrl}${originalUrl && originalUrl !== requestUrl ? ` (original: ${originalUrl})` : ''} → No proxy configured (no rule matched, no ANYCRAWL_PROXY_URL)`);
+        }
         return null;
     },
     // Fallback proxy configuration from ANYCRAWL_PROXY_URL environment variable

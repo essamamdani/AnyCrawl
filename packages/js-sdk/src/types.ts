@@ -2,7 +2,7 @@ export type ApiResponse<T> = { success: true; data: T } | { success: false; erro
 
 export type ExtractSource = 'html' | 'markdown';
 export type Engine = 'playwright' | 'cheerio' | 'puppeteer';
-export type ScrapeFormat = 'markdown' | 'html' | 'text' | 'screenshot' | 'screenshot@fullPage' | 'rawHtml' | 'json';
+export type ScrapeFormat = 'markdown' | 'html' | 'text' | 'screenshot' | 'screenshot@fullPage' | 'rawHtml' | 'json' | 'summary' | 'links';
 
 // Project-aligned JSON schema (@anycrawl/libs: jsonSchemaType)
 export type JSONSchema = {
@@ -20,8 +20,25 @@ export type JsonOptions = {
     schema_description?: string;
 };
 
+export type ProxyMode = 'auto' | 'base' | 'stealth';
+
+/**
+ * Resolved proxy mode returned in responses
+ * - "base": Using ANYCRAWL_PROXY_URL (default)
+ * - "stealth": Using ANYCRAWL_PROXY_STEALTH_URL
+ * - "custom": Using a custom proxy URL
+ */
+export type ResolvedProxyMode = 'base' | 'stealth' | 'custom';
+
 export type ScrapeOptionsInput = {
-    proxy?: string;
+    /**
+     * Proxy mode or custom proxy URL.
+     * - "auto": Automatically decide between base and stealth proxy
+     * - "base": Use ANYCRAWL_PROXY_URL (default)
+     * - "stealth": Use ANYCRAWL_PROXY_STEALTH_URL
+     * - Custom URL: A full proxy URL string (e.g., "http://user:pass@proxy:8080")
+     */
+    proxy?: ProxyMode | string;
     formats?: ScrapeFormat[];
     timeout?: number;
     retry?: boolean;
@@ -31,6 +48,20 @@ export type ScrapeOptionsInput = {
     exclude_tags?: string[];
     json_options?: JsonOptions;
     extract_source?: ExtractSource;
+
+    /**
+     * Cache max age in milliseconds.
+     * - Omit: use server default
+     * - 0: skip cache read (force refresh)
+     * - > 0: accept cached content within this age
+     */
+    max_age?: number;
+
+    /**
+     * Whether to store this result in Page Cache.
+     * Default is true on the server.
+     */
+    store_in_cache?: boolean;
 };
 
 export type ScrapeRequest = {
@@ -49,6 +80,18 @@ export type ScrapeResultSuccess = {
     timestamp: string;
     screenshot?: string;
     'screenshot@fullPage'?: string;
+    links?: string[];
+    /**
+     * The proxy mode used for this request
+     * - "base": Used ANYCRAWL_PROXY_URL (default)
+     * - "stealth": Used ANYCRAWL_PROXY_STEALTH_URL
+     * - "custom": Used a custom proxy URL
+     */
+    proxy?: ResolvedProxyMode;
+    /** Present on cache hits (ISO string) */
+    cachedAt?: string;
+    /** Present on cache hits: max age used for the cache read (ms) */
+    maxAge?: number;
 };
 export type ScrapeResultFailed = {
     url: string;
@@ -128,3 +171,22 @@ export type CrawlAndWaitResult = {
     data: any[];
 };
 
+// Map types
+export type MapLink = {
+    url: string;
+    title?: string;
+    description?: string;
+};
+
+export type MapRequest = {
+    url: string;
+    limit?: number;
+    include_subdomains?: boolean;
+    ignore_sitemap?: boolean;
+    max_age?: number;
+    use_index?: boolean;
+};
+
+export type MapResult = {
+    links: MapLink[];
+};

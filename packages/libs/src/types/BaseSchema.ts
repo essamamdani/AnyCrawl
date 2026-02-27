@@ -55,9 +55,16 @@ export const baseSchema = z.object({
     engine: z.enum(ALLOWED_ENGINES).default("cheerio"),
 
     /**
-     * The proxy to be used
+     * The proxy mode or custom proxy URL to be used.
+     * - "auto": Automatically decide between base and stealth proxy (default)
+     * - "base": Use ANYCRAWL_PROXY_URL
+     * - "stealth": Use ANYCRAWL_PROXY_STEALTH_URL
+     * - Custom URL: A full proxy URL string (e.g., "http://user:pass@proxy:8080")
      */
-    proxy: z.string().url().optional(),
+    proxy: z.union([
+        z.enum(["auto", "base", "stealth"]),
+        z.string().url()
+    ]).optional(),
 
     /**
      * The formats to be used
@@ -122,6 +129,14 @@ export const baseSchema = z.object({
     exclude_tags: z.array(z.string()).optional(),
 
     /**
+     * Only extract main content, removing headers, footers, navigation, etc.
+     * When true, applies EXCLUDE_NON_MAIN_TAGS filtering
+     * When false, preserves full page structure
+     * Note: include_tags takes precedence over this option
+     */
+    only_main_content: z.boolean().default(true),
+
+    /**
      * The JSON options to be used for extracting structured data
      * If all nested fields are empty (empty strings or empty schema object),
      * treat as undefined so the request omits json_options entirely.
@@ -152,6 +167,26 @@ export const baseSchema = z.object({
      * The source format to use for JSON extraction (html or markdown)
      */
     extract_source: z.enum(EXTRACT_SOURCES).default("markdown"),
+
+    /**
+     * Enable OCR enhancement for markdown images.
+     * When enabled, OCR text blocks are appended after each markdown image.
+     */
+    ocr_options: z.boolean().default(false),
+
+    /**
+     * Cache control: Maximum age of cached content in milliseconds.
+     * - undefined: Use default (2 days)
+     * - 0: Force refresh, skip cache
+     * - > 0: Accept cached content within this age
+     */
+    max_age: z.number().min(0).optional(),
+
+    /**
+     * Cache control: Whether to store the result in cache.
+     * Default is true.
+     */
+    store_in_cache: z.boolean().default(true),
 });
 
 export type BaseSchema = z.infer<typeof baseSchema>;

@@ -8,6 +8,96 @@ import { ProgressManager } from "./managers/Progress.js";
 import { ALLOWED_ENGINES, JOB_TYPE_CRAWL, JOB_TYPE_SCRAPE } from "@anycrawl/libs";
 import { ensureAIConfigLoaded } from "@anycrawl/ai/utils/config.js";
 import { refreshAIConfig, getDefaultLLModelId, getEnabledProviderModels } from "@anycrawl/ai/utils/helper.js";
+import { getDB, schemas, eq } from "@anycrawl/db";
+import { finalizeExecution } from "./managers/ExecutionLifecycle.js";
+
+// Helper function to update execution status
+// Note: Metrics (credits_used, items_processed, etc.) are stored in jobs table
+// and should be retrieved via JOIN when querying executions
+async function updateExecutionStatus(
+    executionUuid: string,
+    status: 'completed' | 'failed',
+    _job: Job,
+    error?: Error
+): Promise<void> {
+    try {
+        log.info(`[EXECUTION] Updating execution ${executionUuid} to ${status}`);
+
+        const errorMessage = status === "failed" ? (error?.message || "Execution failed") : undefined;
+        const errorCode = status === "failed" ? (error?.name || "EXECUTION_ERROR") : undefined;
+        const errorDetails = status === "failed"
+            ? {
+                name: error?.name || "Error",
+                message: errorMessage,
+                stack: error?.stack,
+                timestamp: new Date().toISOString(),
+                source: "worker",
+            }
+            : undefined;
+
+        const result = await finalizeExecution({
+            executionUuid,
+            status,
+            errorMessage,
+            errorCode,
+            errorDetails,
+            source: "worker",
+        });
+
+        if (!result.transitioned) {
+            log.warning(`[EXECUTION] Execution ${executionUuid} was already finalized, skipping duplicate ${status}`);
+        }
+
+        log.info(`[EXECUTION] Updated execution ${executionUuid} successfully`);
+    } catch (error) {
+        log.error(`[EXECUTION] Failed to update execution ${executionUuid}: ${error}`);
+    }
+}
+
+// Helper function to mark execution as started (when job actually begins processing)
+async function markExecutionStarted(executionUuid: string): Promise<void> {
+    try {
+        const db = await getDB();
+
+        log.info(`[EXECUTION] Marking execution ${executionUuid} as started`);
+
+        await db
+            .update(schemas.taskExecutions)
+            .set({
+                startedAt: new Date(),
+            })
+            .where(eq(schemas.taskExecutions.uuid, executionUuid));
+
+        log.info(`[EXECUTION] Marked execution ${executionUuid} as started`);
+    } catch (error) {
+        log.error(`[EXECUTION] Failed to mark execution ${executionUuid} as started: ${error}`);
+    }
+}
+
+// Parse command-line arguments for queue selection
+function parseQueueArgs(): { queues: string[], schedulerOnly: boolean } {
+    const args = process.argv.slice(2);
+    const queueArg = args.find(arg => arg.startsWith('--queues='));
+
+    if (!queueArg) {
+        // Default: start all queues
+        return { queues: [], schedulerOnly: false };
+    }
+
+    const queuesValue = queueArg.split('=')[1];
+    if (!queuesValue) {
+        return { queues: [], schedulerOnly: false };
+    }
+
+    const queues = queuesValue.split(',').map(q => q.trim()).filter(q => q);
+
+    // Check if only scheduler is requested
+    const schedulerOnly = queues.length === 1 && queues[0] === 'scheduler';
+
+    return { queues, schedulerOnly };
+}
+
+const { queues: requestedQueues, schedulerOnly } = parseQueueArgs();
 
 // Initialize Utils first
 const utils = Utils.getInstance();
@@ -36,16 +126,58 @@ const authEnabled = process.env.ANYCRAWL_API_AUTH_ENABLED === "true";
 const creditsEnabled = process.env.ANYCRAWL_API_CREDITS_ENABLED === "true";
 log.info(`🔐 Auth enabled: ${authEnabled}`);
 log.info(`💳 Credits deduction enabled: ${creditsEnabled}`);
-log.info("Initializing queues and engines...");
-// Dynamically import after AI config is ready to ensure @anycrawl/ai is initialized with config
-const { EngineQueueManager, AVAILABLE_ENGINES } = await import("./managers/EngineQueue.js");
-const engineQueueManager = EngineQueueManager.getInstance();
-await engineQueueManager.initializeQueues();
-await engineQueueManager.initializeEngines();
 
-// Initialize QueueManager
-QueueManager.getInstance();
-log.info("All queues and engines initialized and started");
+// Determine which engines to initialize based on requested queues
+let AVAILABLE_ENGINES: string[] = [];
+let engineQueueManager: any;
+
+if (!schedulerOnly) {
+    log.info("Initializing queues and engines...");
+    // Dynamically import after AI config is ready to ensure @anycrawl/ai is initialized with config
+    const { EngineQueueManager, AVAILABLE_ENGINES: ALL_ENGINES } = await import("./managers/EngineQueue.js");
+
+    // Filter engines based on requested queues
+    if (requestedQueues.length > 0) {
+        // Extract engine names from queue names (e.g., "playwright", "puppeteer", "cheerio")
+        const requestedEngines = new Set(
+            requestedQueues
+                .filter(q => q !== 'scheduler')
+                .map(q => q.replace(/^(scrape-|crawl-)/, ''))
+        );
+        AVAILABLE_ENGINES = [...ALL_ENGINES].filter((engine: string) => requestedEngines.has(engine));
+        log.info(`🎯 Starting selected queues: ${Array.from(requestedEngines).join(', ')}`);
+    } else {
+        AVAILABLE_ENGINES = [...ALL_ENGINES];
+        log.info("🚀 Starting all available queues");
+    }
+
+    engineQueueManager = EngineQueueManager.getInstance();
+    await engineQueueManager.initializeQueues();
+    await engineQueueManager.initializeEngines();
+
+    // Initialize QueueManager
+    QueueManager.getInstance();
+    log.info("All queues and engines initialized and started");
+} else {
+    log.info("🎯 Starting scheduler only (no browser queues)");
+}
+
+// Initialize Scheduler Manager (if enabled and requested)
+const shouldStartScheduler = process.env.ANYCRAWL_SCHEDULER_ENABLED === "true" &&
+    (requestedQueues.length === 0 || requestedQueues.includes('scheduler'));
+
+if (shouldStartScheduler) {
+    const { SchedulerManager } = await import("./managers/Scheduler.js");
+    await SchedulerManager.getInstance().start();
+    log.info("✅ Scheduler Manager initialized");
+}
+
+// Initialize Webhook Manager (if enabled)
+if (process.env.ANYCRAWL_WEBHOOKS_ENABLED === "true") {
+    const { WebhookManager } = await import("./managers/Webhook.js");
+    await WebhookManager.getInstance().initialize();
+    log.info("✅ Webhook Manager initialized");
+}
 
 async function runJob(job: Job) {
     const engineType = job.data.engine || "cheerio";
@@ -68,12 +200,20 @@ async function runJob(job: Job) {
         {
             jobId: currentJobId, // Use queue job ID for status updates
             parentId: parentId, // Use parent job ID for result recording
+            engine: engineType,
             queueName: job.data.queueName,
             type: jobType,
             // Ensure template variables are available to the engine context
             templateVariables: job.data.templateVariables,
             options: options || {},
             crawl_options: jobType === JOB_TYPE_CRAWL ? job.data.options : null,
+            // Set original_url to initial URL for proxy rule matching
+            // This ensures proxy rules can match correctly for both initial and subsequent requests
+            original_url: job.data.url,
+            // Pass scheduled task info for credit deduction
+            scheduled_task_id: job.data.scheduled_task_id,
+            scheduled_execution_id: job.data.scheduled_execution_id,
+            scheduled_template_credits: job.data.scheduled_template_credits,
         }
     );
     // Seed enqueued counter for crawl jobs (the initial URL itself)
@@ -96,49 +236,121 @@ async function runJob(job: Job) {
         log.info("Redis connection established");
         // Start the worker to handle new URLs
         log.info("Starting worker...");
-        await Promise.all([
-            // Workers for scrape jobs
-            ...AVAILABLE_ENGINES.map((engineType: any) =>
-                WorkerManager.getInstance().getWorker(`scrape-${engineType}`, async (job: Job) => {
-                    job.updateData({
-                        ...job.data,
-                        type: JOB_TYPE_SCRAPE,
-                    });
-                    await runJob(job);
+        const workers = [];
+
+        // Worker for scheduler queue (BullMQ repeatable jobs)
+        if (shouldStartScheduler) {
+            workers.push(
+                WorkerManager.getInstance().getWorker('scheduler', async (job: Job) => {
+                    const { SchedulerManager } = await import("./managers/Scheduler.js");
+                    await SchedulerManager.getInstance().processScheduledTaskJob(job);
                 })
-            ),
-            // Workers for crawl jobs
-            ...AVAILABLE_ENGINES.map((engineType: any) =>
-                WorkerManager.getInstance().getWorker(`crawl-${engineType}`, async (job: Job) => {
-                    job.updateData({
-                        ...job.data,
-                        type: JOB_TYPE_CRAWL,
+            );
+        }
+
+        // Workers for scrape and crawl jobs (only if not scheduler-only mode)
+        if (!schedulerOnly) {
+            // Workers for scrape jobs
+            const scrapeWorkers = await Promise.all(
+                AVAILABLE_ENGINES.map(async (engineType: any) => {
+                    const worker = await WorkerManager.getInstance().getWorker(`scrape-${engineType}`, async (job: Job) => {
+                        log.info(`[WORKER] Processing scrape job: ${job.id}`);
+                        log.info(`[WORKER]   Queue: scrape-${engineType}`);
+                        log.info(`[WORKER]   URL: ${job.data.url}`);
+                        log.info(`[WORKER]   Engine: ${job.data.engine}`);
+                        log.info(`[WORKER]   QueueName: ${job.data.queueName}`);
+                        log.info(`[WORKER]   Scheduled Task: ${job.data.scheduled_task_id || 'N/A'}`);
+
+                        // Mark execution as started when job actually begins processing
+                        if (job.data.scheduled_execution_id) {
+                            await markExecutionStarted(job.data.scheduled_execution_id);
+                        }
+
+                        job.updateData({
+                            ...job.data,
+                            type: JOB_TYPE_SCRAPE,
+                        });
+                        await runJob(job);
                     });
-                    await runJob(job);
-                }),
-            )
-        ]);
+
+                    // Add event listeners for scheduled task executions
+                    worker.on('completed', async (job: Job) => {
+                        if (job.data.scheduled_execution_id) {
+                            await updateExecutionStatus(job.data.scheduled_execution_id, 'completed', job);
+                        }
+                    });
+
+                    worker.on('failed', async (job: Job | undefined, error: Error) => {
+                        if (job?.data.scheduled_execution_id) {
+                            await updateExecutionStatus(job.data.scheduled_execution_id, 'failed', job, error);
+                        }
+                    });
+
+                    return worker;
+                })
+            );
+
+            workers.push(...scrapeWorkers);
+            // Workers for crawl jobs
+            const crawlWorkers = await Promise.all(
+                AVAILABLE_ENGINES.map(async (engineType: any) => {
+                    const worker = await WorkerManager.getInstance().getWorker(`crawl-${engineType}`, async (job: Job) => {
+                        // Mark execution as started when job actually begins processing
+                        if (job.data.scheduled_execution_id) {
+                            await markExecutionStarted(job.data.scheduled_execution_id);
+                        }
+
+                        job.updateData({
+                            ...job.data,
+                            type: JOB_TYPE_CRAWL,
+                        });
+                        await runJob(job);
+                    });
+
+                    // Add event listeners for scheduled task executions
+                    worker.on('completed', async (job: Job) => {
+                        if (job.data.scheduled_execution_id) {
+                            await updateExecutionStatus(job.data.scheduled_execution_id, 'completed', job);
+                        }
+                    });
+
+                    worker.on('failed', async (job: Job | undefined, error: Error) => {
+                        if (job?.data.scheduled_execution_id) {
+                            await updateExecutionStatus(job.data.scheduled_execution_id, 'failed', job, error);
+                        }
+                    });
+
+                    return worker;
+                })
+            );
+
+            workers.push(...crawlWorkers);
+        }
+
+        await Promise.all(workers);
 
         log.info("Worker started successfully");
 
-        // Check queue status periodically for all engines
-        setInterval(async () => {
-            for (const engineType of AVAILABLE_ENGINES) {
-                try {
-                    const queueInfo = await engineQueueManager.getQueueInfo(engineType);
-                    if (queueInfo) {
-                        log.info(
-                            `Queue status for ${engineType} - requests: ${queueInfo.pendingRequestCount}, handled: ${queueInfo.handledRequestCount}`
-                        );
+        // Check queue status periodically for all engines (only if not scheduler-only)
+        if (!schedulerOnly) {
+            setInterval(async () => {
+                for (const engineType of AVAILABLE_ENGINES) {
+                    try {
+                        const queueInfo = await engineQueueManager.getQueueInfo(engineType);
+                        if (queueInfo) {
+                            log.info(
+                                `[QUEUE] ${engineType} - requests: ${queueInfo.pendingRequestCount}, handled: ${queueInfo.handledRequestCount}`
+                            );
+                        }
+                    } catch (error) {
+                        log.error(`[QUEUE] Error checking status for ${engineType}: ${error}`);
                     }
-                } catch (error) {
-                    log.error(`Error checking queue status for ${engineType}: ${error}`);
                 }
-            }
-        }, 3000); // Check every 3 seconds
+            }, 3000); // Check every 3 seconds
+        }
 
-        // Log current browser instances for browser engines (controlled by env)
-        if (process.env.ANYCRAWL_LOG_BROWSER_STATUS === "true") {
+        // Log current browser instances for browser engines (controlled by env, only if not scheduler-only)
+        if (!schedulerOnly && process.env.ANYCRAWL_LOG_BROWSER_STATUS === "true") {
             setInterval(async () => {
                 for (const engineType of AVAILABLE_ENGINES) {
                     try {
@@ -164,80 +376,58 @@ async function runJob(job: Job) {
                             }
                         }
 
-                        log.info(`Browser status for ${engineType} - count: ${browserCount} (desired=${desiredConcurrency}, current=${currentConcurrency})`);
+                        log.info(`[BROWSER] ${engineType} - count: ${browserCount} (desired=${desiredConcurrency}, current=${currentConcurrency})`);
                     } catch (error) {
-                        log.error(`Error checking browser status for ${engineType}: ${error}`);
+                        log.error(`[BROWSER] Error checking status for ${engineType}: ${error}`);
                     }
                 }
             }, 5000); // Check every 5 seconds
         }
 
-        // Check for jobs that need finalization based on limits
+        // Check for jobs that need finalization based on limits (using Redis set tracking)
         setInterval(async () => {
             try {
-                log.debug("Starting periodic finalization check for crawl jobs...");
+                log.debug("[FINALIZE] Starting periodic finalization check for crawl jobs...");
                 const pm = ProgressManager.getInstance();
-                // Get all active crawl jobs from the database
-                const { getDB, schemas, eq, sql } = await import("@anycrawl/db");
-                const db = await getDB();
 
-                // Use proper drizzle syntax for the query
-                const activeJobs = await db
-                    .select({
-                        jobId: schemas.jobs.jobId,
-                        queueName: schemas.jobs.jobQueueName,
-                        payload: schemas.jobs.payload,
-                        status: schemas.jobs.status
-                    })
-                    .from(schemas.jobs)
-                    .limit(1000)
-                    .where(
-                        sql`${schemas.jobs.status} = 'pending' AND ${schemas.jobs.payload}->>'type' = 'crawl'`
-                    );
+                // Get jobs from Redis finalize set (much faster than DB query)
+                const jobsToCheck = await pm.getJobsToFinalize();
 
-                log.debug(`Found ${activeJobs.length} active crawl jobs to check for finalization`);
+                if (jobsToCheck.length === 0) {
+                    log.debug("[FINALIZE] No jobs in finalize set");
+                    return;
+                }
 
-                let checkedJobs = 0;
-                let jobsWithLimits = 0;
+                log.debug(`[FINALIZE] Found ${jobsToCheck.length} jobs in finalize set to check`);
+
                 let finalizedJobs = 0;
 
-                for (const job of activeJobs) {
+                for (const { jobId, queueName, limit } of jobsToCheck) {
                     try {
-                        checkedJobs++;
-                        const payload = job.payload as any;
-                        const limit = payload?.limit;
-
-                        log.debug(`Checking job ${job.jobId} (queue: ${job.queueName}) - limit: ${limit}`);
-
-                        if (limit && typeof limit === 'number' && limit > 0) {
-                            jobsWithLimits++;
-                            log.debug(`Job ${job.jobId} has limit ${limit}, checking for finalization...`);
-
-                            const wasFinalized = await pm.checkAndFinalizeByLimit(job.jobId, job.queueName, limit);
+                        if (limit && limit > 0) {
+                            const wasFinalized = await pm.checkAndFinalizeByLimit(jobId, queueName, limit);
                             if (wasFinalized) {
                                 finalizedJobs++;
-                                log.info(`Job ${job.jobId} was finalized due to reaching limit ${limit}`);
-                            } else {
-                                log.debug(`Job ${job.jobId} not yet ready for finalization (limit: ${limit})`);
+                                log.info(`[FINALIZE] Job ${jobId} was finalized due to reaching limit ${limit}`);
                             }
-                        } else {
-                            log.warning(`Job ${job.jobId} has no valid limit, skipping finalization check`);
                         }
                     } catch (error) {
-                        log.error(`Error checking job ${job.jobId} for finalization: ${error}`);
+                        log.error(`[FINALIZE] Error checking job ${jobId} for finalization: ${error}`);
                     }
                 }
 
-                log.info(`Finalization check completed: ${checkedJobs} jobs checked, ${jobsWithLimits} with limits, ${finalizedJobs} finalized`);
+                if (finalizedJobs > 0) {
+                    log.info(`[FINALIZE] Finalization check completed: ${jobsToCheck.length} jobs checked, ${finalizedJobs} finalized`);
+                }
             } catch (error) {
-                log.error(`Error in periodic finalization check: ${error}`);
+                log.error(`[FINALIZE] Error in periodic finalization check: ${error}`);
             }
         }, 10000); // Check every 10 seconds
 
         // Check for expired jobs and clean them up
         setInterval(async () => {
             try {
-                log.debug("Starting periodic cleanup check for expired jobs...");
+                log.debug("[CLEANUP] Starting periodic cleanup check for expired jobs...");
                 const { getDB, schemas, eq, sql } = await import("@anycrawl/db");
                 const progressManager = ProgressManager.getInstance();
                 const db = await getDB();
@@ -258,7 +448,7 @@ async function runJob(job: Job) {
                     );
 
                 if (expiredJobs.length > 0) {
-                    log.info(`Found ${expiredJobs.length} expired pending jobs to clean up`);
+                    log.info(`[CLEANUP] Found ${expiredJobs.length} expired pending jobs to clean up`);
 
                     let cleanedJobs = 0;
                     for (const job of expiredJobs) {
@@ -273,7 +463,7 @@ async function runJob(job: Job) {
 
                                 if (isFinalized) {
                                     // Job is already finalized by ProgressManager
-                                    log.info(`Expired job ${job.jobId} already finalized by ProgressManager, skipping`);
+                                    log.info(`[CLEANUP] Expired job ${job.jobId} already finalized by ProgressManager, skipping`);
                                     continue;
                                 }
 
@@ -313,30 +503,54 @@ async function runJob(job: Job) {
                                 .where(eq(schemas.jobs.jobId, job.jobId));
 
                             cleanedJobs++;
-                            log.info(`Cleaned up expired job ${job.jobId} (type: ${job.jobType}, expired at: ${job.jobExpireAt}) -> ${finalStatus}`);
+                            log.info(`[CLEANUP] Cleaned up expired job ${job.jobId} (type: ${job.jobType}, expired at: ${job.jobExpireAt}) -> ${finalStatus}`);
                         } catch (error) {
-                            log.error(`Error cleaning up expired job ${job.jobId}: ${error}`);
+                            log.error(`[CLEANUP] Error cleaning up expired job ${job.jobId}: ${error}`);
                         }
                     }
 
-                    log.info(`Expired job cleanup completed: ${cleanedJobs} jobs cleaned up`);
+                    log.info(`[CLEANUP] Expired job cleanup completed: ${cleanedJobs} jobs cleaned up`);
                 } else {
-                    log.debug("No expired jobs found for cleanup");
+                    log.debug("[CLEANUP] No expired jobs found for cleanup");
                 }
             } catch (error) {
-                log.error(`Error in periodic expired job cleanup: ${error}`);
+                log.error(`[CLEANUP] Error in periodic expired job cleanup: ${error}`);
             }
         }, 60000); // Check every 60 seconds
 
         // Handle graceful shutdown
         process.on("SIGINT", async () => {
-            log.warning("Received SIGINT signal, stopping all crawlers...");
+            log.warning("Received SIGINT signal, stopping all services...");
             // Temporarily disable console.warn to prevent the pause message
             const originalWarn = console.warn;
             console.warn = () => { };
 
-            // Stop all engines
-            await engineQueueManager.stopEngines();
+            // Stop Scheduler Manager (if enabled)
+            if (process.env.ANYCRAWL_SCHEDULER_ENABLED === "true") {
+                try {
+                    const { SchedulerManager } = await import("./managers/Scheduler.js");
+                    await SchedulerManager.getInstance().stop();
+                    log.info("✅ Scheduler Manager stopped");
+                } catch (error) {
+                    log.error(`Error stopping Scheduler Manager: ${error}`);
+                }
+            }
+
+            // Stop Webhook Manager (if enabled)
+            if (process.env.ANYCRAWL_WEBHOOKS_ENABLED === "true") {
+                try {
+                    const { WebhookManager } = await import("./managers/Webhook.js");
+                    await WebhookManager.getInstance().stop();
+                    log.info("✅ Webhook Manager stopped");
+                } catch (error) {
+                    log.error(`Error stopping Webhook Manager: ${error}`);
+                }
+            }
+
+            // Stop all engines (if initialized)
+            if (!schedulerOnly) {
+                await engineQueueManager.stopEngines();
+            }
 
             // Restore console.warn
             console.warn = originalWarn;
@@ -351,4 +565,7 @@ async function runJob(job: Job) {
         process.exit(1);
     }
 })();
-await engineQueueManager.startEngines();
+// Start engines (only if not scheduler-only)
+if (!schedulerOnly) {
+    await engineQueueManager.startEngines();
+}
